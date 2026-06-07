@@ -1,0 +1,497 @@
+Build an AI-Powered Warehouse Register to Excel Automation System
+
+Project Overview
+
+Build a production-ready web application that converts handwritten warehouse register images into structured Excel reports.
+
+The application will be used by warehouse workers with very limited technical knowledge, so the UI must be extremely simple and mobile-friendly.
+
+The system should allow users to upload one or more images of handwritten warehouse registers and automatically generate Excel reports following an existing warehouse reporting format.
+
+Workers will manually verify the generated report before final submission, therefore transparency of calculations is more important than perfect automation.
+
+---
+
+Core Workflow
+
+```text
+User Uploads Register Images
+            ↓
+AI Extracts Data From Handwritten Images
+            ↓
+System Groups Entries By Date
+            ↓
+System Groups Records By Financial Month
+            ↓
+System Generates Excel Formulas
+            ↓
+Excel Workbook Generated
+            ↓
+User Downloads Report
+```
+
+---
+
+Technology Stack
+
+Frontend:
+
+* Next.js
+* React
+* TailwindCSS
+* Mobile-first responsive design
+
+Backend:
+
+* FastAPI (Python)
+
+AI Extraction:
+
+* Gemini 2.5 Flash
+
+Excel Generation:
+
+* OpenPyXL
+
+Deployment:
+
+* Docker
+* Railway / VPS
+
+---
+
+Important Requirements
+
+The application must be accessible from:
+
+* Mobile phones
+* Tablets
+* Desktop browsers
+
+No software installation should be required by end users.
+
+Users should simply visit a URL, upload images, and download the generated Excel report.
+
+---
+
+Input
+
+Users may upload:
+
+* One image
+* Multiple images
+
+Images contain handwritten warehouse inward or outward register entries.
+
+---
+
+User Inputs Required
+
+When generating a report, the user should provide:
+
+Entry Type
+
+Radio Buttons:
+
+```text
+○ Inward
+○ Outward
+```
+
+Even if the image contains "Inward" or "Outward" written on it, the user must still be allowed to explicitly choose the type.
+
+---
+
+Opening Capacity Mode
+
+Radio Buttons:
+
+```text
+○ Manual Entry
+○ Carry Forward From Previous F-Month
+```
+
+---
+
+Opening Capacity Value
+
+Visible only when Manual Entry is selected.
+
+Example:
+
+```text
+148.520
+```
+
+---
+
+Data Extraction Requirements
+
+From handwritten register images, extract:
+
+* Date
+* Bond/Bags
+* Quantity / Weight
+* Location (if available)
+
+The AI should return structured JSON.
+
+Example:
+
+```json
+[
+  {
+    "date": "19-02-2026",
+    "bond_bags": [
+      "775/300",
+      "759/301",
+      "407/270"
+    ],
+    "quantities": [
+      18225
+    ]
+  }
+]
+```
+
+---
+
+Date Grouping Rules
+
+Multiple entries may belong to the same date.
+
+Example:
+
+```text
+19-02-2026
+
+775/300
+759/301
+407/270
+```
+
+All entries belonging to the same date must be grouped into a single record.
+
+---
+
+Financial Month (F-Month) Rules
+
+The reporting period is not a normal calendar month.
+
+Financial months are defined as:
+
+```text
+11 Feb → 10 Mar
+11 Mar → 10 Apr
+11 Apr → 10 May
+11 May → 10 Jun
+...
+```
+
+The system must automatically determine the correct F-Month for every extracted entry.
+
+---
+
+Worksheet Rules
+
+Each F-Month should have its own worksheet.
+
+Example:
+
+```text
+Workbook
+
+├── Feb-Mar-2026
+├── Mar-Apr-2026
+├── Apr-May-2026
+```
+
+---
+
+Inward and Outward Placement
+
+For a given F-Month:
+
+Both inward and outward records must exist in the same worksheet.
+
+Do not create separate worksheets for inward and outward records.
+
+---
+
+Formula Generation Rules
+
+IMPORTANT:
+
+Never write calculated values into Excel.
+
+Always write formulas.
+
+Workers must be able to inspect formulas directly.
+
+---
+
+Inward Bags Formula
+
+Bond/Bags format:
+
+```text
+401/565
+403/89
+426/647
+```
+
+Only the value after "/" should be used.
+
+Generated Excel formula:
+
+```excel
+=565+89+647
+```
+
+Do not write:
+
+```excel
+1301
+```
+
+---
+
+Outward Bags Formula
+
+Bond/Bags format:
+
+```text
+775/300
+759/301
+407/270
+```
+
+Generated Excel formula:
+
+```excel
+=300+301+270
+```
+
+Do not write:
+
+```excel
+871
+```
+
+---
+
+Inward MT Formula
+
+If quantities are:
+
+```text
+16095
+2230
+7925
+```
+
+Generated formula:
+
+```excel
+=(16095+2230+7925)/1000
+```
+
+Do not store the computed result.
+
+Store the formula itself.
+
+---
+
+Outward MT Formula
+
+If quantities are:
+
+```text
+18225
+7895
+17625
+```
+
+Generated formula:
+
+```excel
+=(18225+7895+17625)/1000
+```
+
+Do not store the computed result.
+
+Store the formula itself.
+
+---
+
+Capacity Calculation Rules
+
+Running capacity must be maintained using Excel formulas.
+
+Formula:
+
+```text
+Previous Capacity
++ Inward MT
+− Outward MT
+```
+
+Example:
+
+```excel
+=D10+B11-C11
+```
+
+Where:
+
+```text
+D10 = Previous Capacity
+B11 = Inward MT
+C11 = Outward MT
+```
+
+The formula must be written into the workbook.
+
+---
+
+Opening Capacity Rules
+
+Support two modes:
+
+Mode A: Manual Entry
+
+User enters opening capacity manually.
+
+Example:
+
+```text
+148.520
+```
+
+---
+
+Mode B: Carry Forward
+
+Opening capacity should automatically use the previous F-Month closing capacity.
+
+---
+
+Multi-Image Rules
+
+Users may upload any number of images.
+
+Example:
+
+```text
+1 image
+5 images
+20 images
+50 images
+```
+
+The system must:
+
+* Extract all images
+* Merge data
+* Group by date
+* Group by F-Month
+* Generate a single workbook
+
+---
+
+Verification Requirement
+
+Warehouse workers will verify the generated report.
+
+Therefore:
+
+* Preserve formulas
+* Preserve extracted values
+* Make calculations transparent
+* Never hide calculations
+
+---
+
+Excel Output Requirements
+
+Generate an .xlsx workbook.
+
+Requirements:
+
+* Follow the warehouse template structure.
+* Preserve all formulas.
+* One worksheet per F-Month.
+* Support both inward and outward data.
+* Use formulas instead of computed values.
+* Be compatible with Microsoft Excel.
+
+---
+
+UI Requirements
+
+The UI must be extremely simple.
+
+Screen Layout:
+
+```text
+Warehouse Register Automation
+
+Upload Images
+
+[ Choose Files ]
+
+Entry Type
+
+( ) Inward
+( ) Outward
+
+Opening Capacity
+
+( ) Manual
+( ) Carry Forward
+
+Opening Capacity Value
+
+[________]
+
+[ Generate Report ]
+```
+
+After generation:
+
+```text
+[ Download Excel Report ]
+```
+
+---
+
+Error Handling
+
+Handle:
+
+* Invalid images
+* Empty uploads
+* Missing extracted data
+* AI extraction failures
+* Excel generation failures
+
+Show user-friendly error messages.
+
+---
+
+Deliverables
+
+Build a complete, production-ready application including:
+
+1. Frontend
+2. Backend
+3. AI extraction integration
+4. Excel generation engine
+5. F-Month grouping logic
+6. Formula generation engine
+7. Downloadable workbook generation
+8. Docker support
+9. Deployment-ready configuration
+
+Focus on correctness, maintainability, and simplicity for non-technical warehouse workers.
+develop the entire app in one go make sure all the rules are followed and give me ur responses in a caveman style like 2 words sentences type no need for any authentication should be basic upload photo/photos select options like inward/outward and get download excel option
