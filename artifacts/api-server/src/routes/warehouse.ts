@@ -18,39 +18,44 @@ interface ExtractedEntry {
   quantities: number[];
 }
 
+// Financial month: 11th of month N → 10th of month N+1
+// Returns e.g. "Feb-Mar-2026"
 function getFMonth(dateStr: string): string {
-  // Parse date in format DD-MM-YYYY
   const parts = dateStr.split("-");
   if (parts.length !== 3) return "Unknown";
   const day = parseInt(parts[0]!);
   const month = parseInt(parts[1]!) - 1; // 0-indexed
   const year = parseInt(parts[2]!);
-
   const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
-  let fStartMonth: number;
-  let fStartYear: number;
-  let fEndMonth: number;
-  let fEndYear: number;
-
+  let startMonth: number, startYear: number, endMonth: number, endYear: number;
   if (day >= 11) {
-    fStartMonth = month;
-    fStartYear = year;
-    fEndMonth = (month + 1) % 12;
-    fEndYear = month === 11 ? year + 1 : year;
+    startMonth = month;
+    startYear = year;
+    endMonth = (month + 1) % 12;
+    endYear = month === 11 ? year + 1 : year;
   } else {
-    fStartMonth = (month - 1 + 12) % 12;
-    fStartYear = month === 0 ? year - 1 : year;
-    fEndMonth = month;
-    fEndYear = year;
+    startMonth = (month - 1 + 12) % 12;
+    startYear = month === 0 ? year - 1 : year;
+    endMonth = month;
+    endYear = year;
   }
-
-  return `${monthNames[fStartMonth]}-${monthNames[fEndMonth]}-${fEndYear}`;
+  return `${monthNames[startMonth]}-${monthNames[endMonth]}-${endYear}`;
 }
 
 function parseDate(dateStr: string): Date {
   const parts = dateStr.split("-");
   return new Date(parseInt(parts[2]!), parseInt(parts[1]!) - 1, parseInt(parts[0]!));
+}
+
+// Style helpers
+function applyBorder(cell: ExcelJS.Cell) {
+  cell.border = {
+    top: { style: "thin", color: { argb: "FFBDBDBD" } },
+    left: { style: "thin", color: { argb: "FFBDBDBD" } },
+    bottom: { style: "thin", color: { argb: "FFBDBDBD" } },
+    right: { style: "thin", color: { argb: "FFBDBDBD" } },
+  };
 }
 
 router.post("/process", upload.array("images", 50), async (req, res) => {
@@ -61,41 +66,34 @@ router.post("/process", upload.array("images", 50), async (req, res) => {
       return;
     }
 
-    const entryType = req.body.entryType as string;
-    const openingCapacityMode = req.body.openingCapacityMode as string;
-    const openingCapacityValue = req.body.openingCapacityValue ? parseFloat(req.body.openingCapacityValue) : null;
+    const entryType = (req.body.entryType as string) || "inward";
+    const openingCapacityMode = (req.body.openingCapacityMode as string) || "manual";
+    const openingCapacityValue = req.body.openingCapacityValue ? parseFloat(req.body.openingCapacityValue) : 0;
+    const typeLabel = entryType === "inward" ? "Inward" : "Outward";
 
-    if (!entryType || !["inward", "outward"].includes(entryType)) {
-      res.status(400).json({ error: "Invalid entry type" });
-      return;
-    }
-
-    // Extract data from all images
+    // ── 1. Extract data from each image ──────────────────────────────────
     const allEntries: ExtractedEntry[] = [];
 
     for (const file of files) {
       const base64 = file.buffer.toString("base64");
       const mimeType = file.mimetype || "image/jpeg";
 
-      const prompt = `You are a warehouse data extraction assistant. Extract all handwritten register entries from this image.
-
-Return a JSON array of objects with this exact structure:
+      const prompt = `Extract all handwritten warehouse register entries from this image.
+Return a JSON array. Each element represents one date group:
 [
   {
     "date": "DD-MM-YYYY",
-    "bond_bags": ["401/565", "403/89"],
-    "quantities": [16095, 2230]
+    "bond_bags": ["775/300", "759/301"],
+    "quantities": [18225, 7895]
   }
 ]
-
 Rules:
-- Group entries by date
-- date format must be DD-MM-YYYY
-- bond_bags is array of strings in format "number/number"
-- quantities is array of numbers (weights/MT values without units)
-- If multiple dates exist, return one object per date
-- If no data found, return empty array []
-- Return only valid JSON, no markdown, no explanation`;
+- date must be DD-MM-YYYY format
+- bond_bags: array of strings, each in "bondNumber/bagCount" format
+- quantities: array of numeric values (weights in KG)
+- Group all entries for the same date into one object
+- Return [] if nothing found
+- Output only JSON, no explanation`;
 
       const response = await ai.models.generateContent({
         model: "gemini-2.5-flash",
@@ -115,219 +113,203 @@ Rules:
       });
 
       const text = response.text ?? "";
-
       try {
-        // Try direct parse first (responseMimeType forces clean JSON)
         let parsed: unknown;
         try {
           parsed = JSON.parse(text);
         } catch {
-          // Fallback: extract JSON array from anywhere in the text
           const match = text.match(/\[[\s\S]*\]/);
-          if (match) {
-            parsed = JSON.parse(match[0]);
-          } else {
-            throw new Error("No JSON array found in response");
-          }
+          if (match) parsed = JSON.parse(match[0]);
+          else throw new Error("No JSON array in response");
         }
         if (Array.isArray(parsed)) {
           allEntries.push(...(parsed as ExtractedEntry[]));
         }
       } catch (parseErr) {
-        req.log?.warn({ text: text.slice(0, 500), parseErr }, "Failed to parse AI response");
+        req.log?.warn({ snippet: text.slice(0, 300), parseErr }, "Failed to parse AI response");
       }
     }
 
     if (allEntries.length === 0) {
-      res.status(400).json({ error: "No data could be extracted from the images" });
+      res.status(400).json({ error: "No data could be extracted from the uploaded images. Please ensure the images are clear and contain handwritten register entries." });
       return;
     }
 
-    // Merge entries by date
+    // ── 2. Merge by date ─────────────────────────────────────────────────
     const dateMap = new Map<string, ExtractedEntry>();
     for (const entry of allEntries) {
+      if (!entry.date || !Array.isArray(entry.bond_bags) || !Array.isArray(entry.quantities)) continue;
       if (dateMap.has(entry.date)) {
-        const existing = dateMap.get(entry.date)!;
-        existing.bond_bags.push(...entry.bond_bags);
-        existing.quantities.push(...entry.quantities);
+        const ex = dateMap.get(entry.date)!;
+        ex.bond_bags.push(...entry.bond_bags);
+        ex.quantities.push(...entry.quantities);
       } else {
         dateMap.set(entry.date, { ...entry, bond_bags: [...entry.bond_bags], quantities: [...entry.quantities] });
       }
     }
 
-    // Group by F-Month
+    // ── 3. Group by F-Month ──────────────────────────────────────────────
     const fMonthMap = new Map<string, ExtractedEntry[]>();
     for (const [, entry] of dateMap) {
-      const fMonth = getFMonth(entry.date);
-      if (!fMonthMap.has(fMonth)) {
-        fMonthMap.set(fMonth, []);
-      }
-      fMonthMap.get(fMonth)!.push(entry);
+      const fm = getFMonth(entry.date);
+      if (!fMonthMap.has(fm)) fMonthMap.set(fm, []);
+      fMonthMap.get(fm)!.push(entry);
     }
-
-    // Sort entries within each F-Month by date
-    for (const [, entries] of fMonthMap) {
+    for (const entries of fMonthMap.values()) {
       entries.sort((a, b) => parseDate(a.date).getTime() - parseDate(b.date).getTime());
     }
-
-    // Sort F-Months chronologically
     const sortedFMonths = Array.from(fMonthMap.keys()).sort((a, b) => {
-      const aEntries = fMonthMap.get(a)!;
-      const bEntries = fMonthMap.get(b)!;
-      return parseDate(aEntries[0]!.date).getTime() - parseDate(bEntries[0]!.date).getTime();
+      const aD = fMonthMap.get(a)![0]!.date;
+      const bD = fMonthMap.get(b)![0]!.date;
+      return parseDate(aD).getTime() - parseDate(bD).getTime();
     });
 
-    // Generate Excel workbook
+    // ── 4. Build Excel workbook ──────────────────────────────────────────
     const workbook = new ExcelJS.Workbook();
     workbook.creator = "Warehouse Register System";
     workbook.created = new Date();
 
-    const isInward = entryType === "inward";
+    // Track last capacity cell reference for carry-forward between sheets
+    const sheetClosingRef = new Map<string, { sheet: string; cell: string }>();
 
-    // Track closing capacity per sheet for carry-forward
-    const closingCapacities = new Map<string, string>(); // fMonth -> cell reference or value
-
-    for (let sheetIndex = 0; sheetIndex < sortedFMonths.length; sheetIndex++) {
-      const fMonth = sortedFMonths[sheetIndex]!;
+    for (let si = 0; si < sortedFMonths.length; si++) {
+      const fMonth = sortedFMonths[si]!;
       const entries = fMonthMap.get(fMonth)!;
+      const ws = workbook.addWorksheet(fMonth);
 
-      const sheet = workbook.addWorksheet(fMonth);
-
-      // Column widths
-      sheet.columns = [
-        { key: "date", width: 15 },
-        { key: "inward", width: 16 },
-        { key: "outward", width: 16 },
-        { key: "capacity", width: 16 },
-        { key: "bags", width: 20 },
+      // Column definitions
+      // A=Date  B=Type  C=Bond/Bags  D=Bags  E=MT  F=Capacity
+      ws.columns = [
+        { key: "date",     width: 14 },
+        { key: "type",     width: 10 },
+        { key: "bondbags", width: 28 },
+        { key: "bags",     width: 10 },
+        { key: "mt",       width: 12 },
+        { key: "capacity", width: 14 },
       ];
 
-      // Header row
-      const headerRow = sheet.addRow(["Date", "Inward MT", "Outward MT", "Capacity MT", "Bags"]);
-      headerRow.font = { bold: true };
-      headerRow.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFD9E1F2" } };
-      headerRow.border = {
-        bottom: { style: "medium" },
-      };
-
-      // Opening capacity row (row 2)
-      let openingCapacityFormula: string;
-      let openingCapacityValue_actual: number | string;
-
-      if (openingCapacityMode === "manual" || sheetIndex === 0) {
-        if (openingCapacityMode === "carryforward" && sheetIndex > 0) {
-          const prevFMonth = sortedFMonths[sheetIndex - 1]!;
-          const prevClosingRef = closingCapacities.get(prevFMonth);
-          openingCapacityFormula = prevClosingRef ? `=${prevClosingRef}` : "=0";
-          openingCapacityValue_actual = openingCapacityFormula;
-        } else {
-          openingCapacityValue_actual = openingCapacityValue ?? 0;
-          openingCapacityFormula = String(openingCapacityValue_actual);
-        }
-      } else {
-        const prevFMonth = sortedFMonths[sheetIndex - 1]!;
-        const prevClosingRef = closingCapacities.get(prevFMonth);
-        openingCapacityFormula = prevClosingRef ? `=${prevClosingRef}` : "=0";
-        openingCapacityValue_actual = openingCapacityFormula;
-      }
-
-      const openingRow = sheet.addRow(["Opening", null, null, null, null]);
-      openingRow.font = { italic: true, color: { argb: "FF595959" } };
-
-      // Set opening capacity in column D (capacity)
-      const openingCapacityCell = openingRow.getCell(4);
-      if (typeof openingCapacityValue_actual === "number") {
-        openingCapacityCell.value = openingCapacityValue_actual;
-      } else if (openingCapacityFormula.startsWith("=")) {
-        openingCapacityCell.value = { formula: openingCapacityFormula.slice(1), result: 0 };
-      } else {
-        openingCapacityCell.value = openingCapacityValue ?? 0;
-      }
-
-      const openingRowNumber = openingRow.number;
-
-      // Data rows
-      let lastCapacityRef = `D${openingRowNumber}`;
-
-      for (const entry of entries) {
-        const rowNum = sheet.rowCount + 1;
-
-        const row = sheet.addRow([entry.date, null, null, null, null]);
-
-        // Bags formula - only use the number after "/"
-        const bagParts = entry.bond_bags.map((bb) => {
-          const parts = bb.split("/");
-          return parts.length >= 2 ? parts[parts.length - 1]! : parts[0]!;
-        });
-        const bagsFormula = bagParts.join("+");
-        const bagsCell = row.getCell(5);
-        bagsCell.value = { formula: `=${bagsFormula}`, result: 0 };
-
-        // MT formula = (sum of quantities) / 1000
-        const qtySumStr = entry.quantities.join("+");
-        const mtFormula = `=(${qtySumStr})/1000`;
-
-        if (isInward) {
-          // Inward MT in column B
-          const inwardCell = row.getCell(2);
-          inwardCell.value = { formula: mtFormula.slice(1), result: 0 };
-          // Outward blank
-          row.getCell(3).value = null;
-        } else {
-          // Outward MT in column C
-          const outwardCell = row.getCell(3);
-          outwardCell.value = { formula: mtFormula.slice(1), result: 0 };
-          // Inward blank
-          row.getCell(2).value = null;
-        }
-
-        // Running capacity = previous capacity + inward - outward
-        const capacityCell = row.getCell(4);
-        const capacityFormula = `${lastCapacityRef}+B${rowNum}-C${rowNum}`;
-        capacityCell.value = { formula: capacityFormula, result: 0 };
-        lastCapacityRef = `D${rowNum}`;
-
-        // Number format
-        row.getCell(2).numFmt = "#,##0.000";
-        row.getCell(3).numFmt = "#,##0.000";
-        row.getCell(4).numFmt = "#,##0.000";
-        row.getCell(5).numFmt = "#,##0";
-
-        // Alternating row color
-        if (rowNum % 2 === 0) {
-          row.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFF5F5F5" } };
-        }
-      }
-
-      // Store closing capacity reference for carry-forward
-      closingCapacities.set(fMonth, lastCapacityRef);
-
-      // Closing row
-      const closingRow = sheet.addRow(["Closing", null, null, null, null]);
-      closingRow.font = { bold: true };
-      closingRow.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFE2EFDA" } };
-      const closingCapacityCell = closingRow.getCell(4);
-      closingCapacityCell.value = { formula: lastCapacityRef.replace("D", "D"), result: 0 };
-      closingCapacityCell.numFmt = "#,##0.000";
-
-      // Add borders to all data cells
-      sheet.eachRow((row, rowNumber) => {
-        if (rowNumber >= 1) {
-          row.eachCell((cell) => {
-            cell.border = {
-              top: { style: "thin" },
-              left: { style: "thin" },
-              bottom: { style: "thin" },
-              right: { style: "thin" },
-            };
-          });
-        }
+      // ── Header row (row 1) ────────────────────────────────────────────
+      const hRow = ws.addRow(["Date", "Type", "Bond/Bags", "Bags", "MT", "Capacity"]);
+      hRow.eachCell((cell) => {
+        cell.font = { bold: true, color: { argb: "FFFFFFFF" } };
+        cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF2F5496" } };
+        cell.alignment = { horizontal: "center", vertical: "middle" };
+        applyBorder(cell);
       });
+      hRow.height = 18;
+
+      // ── Opening row (row 2) ───────────────────────────────────────────
+      const openingRow = ws.addRow(["Opening", "", "", "", "", null]);
+      const openingCapCell = openingRow.getCell(6); // F2
+
+      if (si === 0) {
+        // First sheet — use manual value
+        openingCapCell.value = openingCapacityValue;
+      } else if (openingCapacityMode === "carryforward") {
+        // Carry forward from previous sheet's last capacity cell
+        const prevFMonth = sortedFMonths[si - 1]!;
+        const ref = sheetClosingRef.get(prevFMonth);
+        if (ref) {
+          // Cross-sheet reference in Excel
+          openingCapCell.value = { formula: `'${ref.sheet}'!${ref.cell}`, result: 0 };
+        } else {
+          openingCapCell.value = openingCapacityValue;
+        }
+      } else {
+        openingCapCell.value = openingCapacityValue;
+      }
+      openingCapCell.numFmt = '#,##0.000';
+
+      openingRow.eachCell((cell, colNum) => {
+        cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFDCE6F1" } };
+        if (colNum === 1) cell.font = { italic: true };
+        applyBorder(cell);
+      });
+
+      // Track the previous capacity cell for running balance formulas
+      let prevCapRow = 2; // row number of opening
+
+      // ── Data rows ─────────────────────────────────────────────────────
+      for (let ei = 0; ei < entries.length; ei++) {
+        const entry = entries[ei]!;
+        const rowNum = ws.rowCount + 1;
+
+        // Bond/Bags: concatenate raw strings (e.g. "775/300759/301")
+        const bondBagsStr = entry.bond_bags.join("");
+
+        // Bags formula: sum of numbers AFTER "/" in each bond_bag
+        const bagNumbers = entry.bond_bags.map((bb) => {
+          const slash = bb.lastIndexOf("/");
+          return slash >= 0 ? bb.slice(slash + 1) : bb;
+        });
+        const bagsFormula = bagNumbers.join("+");
+
+        // MT formula: =(q1+q2+...)/1000
+        const qtyFormula = entry.quantities.length > 0
+          ? `(${entry.quantities.join("+")}) / 1000`
+          : "0";
+
+        // Capacity formula:
+        // Inward:  prev_capacity + this_MT   → =F{prev}+E{row}
+        // Outward: prev_capacity - this_MT   → =F{prev}-E{row}
+        const capFormula = entryType === "inward"
+          ? `F${prevCapRow}+E${rowNum}`
+          : `F${prevCapRow}-E${rowNum}`;
+
+        const dataRow = ws.addRow([entry.date, typeLabel, bondBagsStr, null, null, null]);
+
+        // D = Bags
+        const bagsCell = dataRow.getCell(4);
+        bagsCell.value = { formula: `=${bagsFormula}`, result: 0 };
+        bagsCell.numFmt = "#,##0";
+
+        // E = MT
+        const mtCell = dataRow.getCell(5);
+        mtCell.value = { formula: `=${qtyFormula}`, result: 0 };
+        mtCell.numFmt = "#,##0.000";
+
+        // F = Capacity
+        const capCell = dataRow.getCell(6);
+        capCell.value = { formula: `=${capFormula}`, result: 0 };
+        capCell.numFmt = "#,##0.000";
+
+        dataRow.eachCell((cell, colNum) => {
+          cell.alignment = { vertical: "middle", horizontal: colNum >= 4 ? "right" : "left" };
+          // Alternating row background
+          if ((ei + 1) % 2 === 0) {
+            cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFF5F8FF" } };
+          }
+          applyBorder(cell);
+        });
+
+        prevCapRow = rowNum;
+      }
+
+      // ── Closing row ───────────────────────────────────────────────────
+      const lastDataRowNum = ws.rowCount;
+      const closingRow = ws.addRow(["Closing", "", "", "", "", null]);
+      const closingCapCell = closingRow.getCell(6);
+      // Just reference the last data row's capacity
+      closingCapCell.value = { formula: `=F${lastDataRowNum}`, result: 0 };
+      closingCapCell.numFmt = "#,##0.000";
+      closingCapCell.font = { bold: true };
+
+      closingRow.eachCell((cell, colNum) => {
+        cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFE2EFDA" } };
+        if (colNum === 1 || colNum === 6) cell.font = { bold: true };
+        applyBorder(cell);
+      });
+
+      // Save the closing capacity cell reference for carry-forward
+      const closingRowNum = closingRow.number;
+      sheetClosingRef.set(fMonth, { sheet: fMonth, cell: `F${closingRowNum}` });
+
+      // Freeze top row
+      ws.views = [{ state: "frozen", ySplit: 1 }];
     }
 
-    // Write to buffer
+    // ── 5. Send response ─────────────────────────────────────────────────
     const buffer = await workbook.xlsx.writeBuffer();
-
     res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
     res.setHeader("Content-Disposition", `attachment; filename="warehouse-register.xlsx"`);
     res.send(Buffer.from(buffer));
