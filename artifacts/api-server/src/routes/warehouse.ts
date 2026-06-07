@@ -1,6 +1,5 @@
 import { Router } from "express";
 import multer from "multer";
-import { GoogleGenAI } from "@google/genai";
 import ExcelJS from "exceljs";
 
 const router = Router();
@@ -10,7 +9,44 @@ if (!process.env.GEMINI_API_KEY) {
   throw new Error("GEMINI_API_KEY must be set.");
 }
 
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`;
+
+async function extractFromImage(base64: string, mimeType: string, prompt: string): Promise<string> {
+  const body = {
+    contents: [
+      {
+        parts: [
+          { inline_data: { mime_type: mimeType, data: base64 } },
+          { text: prompt },
+        ],
+      },
+    ],
+    generationConfig: {
+      response_mime_type: "application/json",
+      max_output_tokens: 8192,
+    },
+  };
+
+  const res = await fetch(GEMINI_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`Gemini API error ${res.status}: ${errText.slice(0, 200)}`);
+  }
+
+  const data = await res.json() as {
+    candidates?: Array<{
+      content?: { parts?: Array<{ text?: string }> };
+    }>;
+  };
+
+  return data?.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
+}
 
 interface ExtractedEntry {
   date: string;
@@ -95,24 +131,7 @@ Rules:
 - Return [] if nothing found
 - Output only JSON, no explanation`;
 
-      const response = await ai.models.generateContent({
-        model: "gemini-2.5-flash",
-        contents: [
-          {
-            role: "user",
-            parts: [
-              { inlineData: { mimeType, data: base64 } },
-              { text: prompt },
-            ],
-          },
-        ],
-        config: {
-          maxOutputTokens: 8192,
-          responseMimeType: "application/json",
-        },
-      });
-
-      const text = response.text ?? "";
+      const text = await extractFromImage(base64, mimeType, prompt);
       try {
         let parsed: unknown;
         try {
