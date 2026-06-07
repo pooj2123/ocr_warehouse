@@ -10,6 +10,8 @@ servers:
 tags:
   - name: health
     description: Health operations
+  - name: warehouse
+    description: Warehouse register operations
 paths:
   /healthz:
     get:
@@ -24,6 +26,40 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+
+  /warehouse/process:
+    post:
+      operationId: processRegister
+      tags: [warehouse]
+      summary: Process register images and generate Excel
+      description: Upload images, extract data via AI, generate Excel workbook
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: "#/components/schemas/RegisterInput"
+      responses:
+        "200":
+          description: Excel file generated successfully
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "400":
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
 components:
   schemas:
     HealthStatus:
@@ -34,3 +70,25 @@ components:
       required:
         - status
 
+    RegisterInput:
+      type: object
+      properties:
+        entryType:
+          type: string
+          enum: [inward, outward]
+        openingCapacityMode:
+          type: string
+          enum: [manual, carryforward]
+        openingCapacityValue:
+          type: ["number", "null"]
+      required:
+        - entryType
+        - openingCapacityMode
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+      required:
+        - error
