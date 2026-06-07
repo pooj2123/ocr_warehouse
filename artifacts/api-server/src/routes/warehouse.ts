@@ -108,19 +108,33 @@ Rules:
             ],
           },
         ],
-        config: { maxOutputTokens: 8192 },
+        config: {
+          maxOutputTokens: 8192,
+          responseMimeType: "application/json",
+        },
       });
 
       const text = response.text ?? "";
-      const cleaned = text.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
 
       try {
-        const parsed = JSON.parse(cleaned) as ExtractedEntry[];
-        if (Array.isArray(parsed)) {
-          allEntries.push(...parsed);
+        // Try direct parse first (responseMimeType forces clean JSON)
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(text);
+        } catch {
+          // Fallback: extract JSON array from anywhere in the text
+          const match = text.match(/\[[\s\S]*\]/);
+          if (match) {
+            parsed = JSON.parse(match[0]);
+          } else {
+            throw new Error("No JSON array found in response");
+          }
         }
-      } catch {
-        req.log?.warn({ text }, "Failed to parse AI response");
+        if (Array.isArray(parsed)) {
+          allEntries.push(...(parsed as ExtractedEntry[]));
+        }
+      } catch (parseErr) {
+        req.log?.warn({ text: text.slice(0, 500), parseErr }, "Failed to parse AI response");
       }
     }
 
